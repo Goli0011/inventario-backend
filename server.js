@@ -1,490 +1,1145 @@
-const express = require('express');
-const mysql = require('mysql2/promise');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const QRCode = require('qrcode');
-const ExcelJS = require('exceljs');
-const PDFDocument = require('pdfkit');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
+const express = require("express");
+const mysql = require("mysql2");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const QRCode = require("qrcode");
+const fs = require("fs");
+const PDFDocument = require("pdfkit");
+const ExcelJS = require("exceljs");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const multer = require("multer");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_2026';
 
-// ----------------------------------------------------
-// 1. CARPETAS Y ARCHIVOS ESTÁTICOS
-// ----------------------------------------------------
-const uploadDir = path.join(__dirname, 'uploads');
-const qrDir = path.join(__dirname, 'qrs');
+const SECRET = process.env.JWT_SECRET || "clave_secreta_inventario";
 
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(qrDir)) fs.mkdirSync(qrDir, { recursive: true });
+// ==================== CONFIGURACIÓN MULTER ====================
 
-// ----------------------------------------------------
-// 2. MIDDLEWARES GLOBALES
-// ----------------------------------------------------
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(uploadDir));
-app.use('/qrs', express.static(qrDir));
-
-// ----------------------------------------------------
-// 3. CONEXIÓN A BASE DE DATOS (MYSQL POOL)
-// ----------------------------------------------------
-const pool = mysql.createPool({
-    host: process.env.MYSQLHOST || process.env.DB_HOST || 'localhost',
-    user: process.env.MYSQLUSER || process.env.DB_USER || 'root',
-    password: process.env.MYSQLPASSWORD || process.env.DB_PASSWORD || 'cafemusunxd23',
-    database: process.env.MYSQL_DATABASE || process.env.MYSQLDATABASE || process.env.DB_NAME || 'railway',
-    port: Number(process.env.MYSQLPORT) || 3306,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-});
-
-// Probar conexión inicial
-(async () => {
-    try {
-        const conn = await pool.getConnection();
-        console.log('✅ Conexión exitosa a MySQL');
-        conn.release();
-    } catch (err) {
-        console.error('❌ Error al conectar a la base de datos:', err.message);
-    }
-})();
-
-// ----------------------------------------------------
-// 4. CONFIGURACIÓN DE SUBIDA DE IMÁGENES (MULTER)
-// ----------------------------------------------------
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
-    }
-});
-
-const upload = multer({
-    storage,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
-    fileFilter: (req, file, cb) => {
-        const allowedTypes = /jpeg|jpg|png|webp/;
-        const mimeType = allowedTypes.test(file.mimetype);
-        const extName = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-        if (mimeType && extName) return cb(null, true);
-        cb(new Error('Formato de imagen no permitido (solo jpg, png, webp)'));
-    }
-});
-
-// ----------------------------------------------------
-// 5. MIDDLEWARE DE AUTENTICACIÓN (JWT)
-// ----------------------------------------------------
-function verificarToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-        return res.status(401).json({ mensaje: 'Acceso denegado: Token no proporcionado' });
-    }
-
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        req.usuario = decoded;
-        next();
-    } catch (err) {
-        return res.status(403).json({ mensaje: 'Token inválido o expirado' });
-    }
+if (!fs.existsSync("./uploads")) {
+    fs.mkdirSync("./uploads", { recursive: true });
 }
 
-// ----------------------------------------------------
-// 6. RUTAS DE AUTENTICACIÓN
-// ----------------------------------------------------
+if (!fs.existsSync("./qrs")) {
+    fs.mkdirSync("./qrs", { recursive: true });
+}
 
-// Registrar usuario
-app.post('/api/auth/register', async (req, res) => {
-    const { nombre, email, password, rol = 'empleado' } = req.body;
-    if (!nombre || !email || !password) {
-        return res.status(400).json({ mensaje: 'Todos los campos son obligatorios' });
-    }
-
-    try {
-        const [existente] = await pool.query('SELECT id FROM usuarios WHERE email = ?', [email]);
-        if (existente.length > 0) {
-            return res.status(400).json({ mensaje: 'El correo ya está registrado' });
-        }
-
-        const salt = await bcrypt.genSalt(10);
-        const passwordHash = await bcrypt.hash(password, salt);
-
-        const [result] = await pool.query(
-            'INSERT INTO usuarios (nombre, email, password, rol) VALUES (?, ?, ?, ?)',
-            [nombre, email, passwordHash, rol]
-        );
-
-        res.status(201).json({ mensaje: 'Usuario registrado con éxito', id: result.insertId });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+const upload = multer({
+    dest: "uploads/"
 });
 
-app.post('/api/auth/login', async (req, res) => {
-    const usuarioInput = req.body.usuario || req.body.email;
-    const claveInput = req.body.clave || req.body.password;
+// ==================== MIDDLEWARE ====================
 
-    if (!usuarioInput || !claveInput) {
-        return res.status(400).json({ 
+app.use(bodyParser.json());
+app.use(cors());
+
+// Permitir que Flutter vea las fotografías y QRs
+app.use("/uploads", express.static("uploads"));
+app.use("/qrs", express.static("qrs"));
+
+// ==================== CONEXIÓN MYSQL / RAILWAY ====================
+
+const conexion = mysql.createConnection({
+    host: process.env.MYSQLHOST || process.env.DB_HOST || "localhost",
+    user: process.env.MYSQLUSER || process.env.DB_USER || "root",
+    password: process.env.MYSQLPASSWORD || process.env.DB_PASSWORD || "cafemusunxd23",
+    database: process.env.MYSQL_DATABASE || process.env.MYSQLDATABASE || process.env.DB_NAME || "railway",
+    port: Number(process.env.MYSQLPORT) || 3306
+});
+
+conexion.connect(err => {
+    if (err) {
+        console.error("Error al conectar con la base de datos:", err);
+        return;
+    }
+    console.log("✅ Conectado exitosamente a la base de datos MySQL");
+});
+
+// ==================== INICIO ====================
+
+app.get("/", (req, res) => {
+    res.send("Bienvenido a Inventario API");
+});
+
+// ==================== MIDDLEWARE JWT ====================
+
+function verificarToken(req, res, next) {
+    const token = req.headers["authorization"];
+
+    if (!token) {
+        return res.status(401).json({
             status: "error",
-            mensaje: "Debes ingresar usuario y contraseña" 
+            mensaje: "Token requerido"
         });
     }
 
-    try {
-        const [usuarios] = await pool.query(
-            'SELECT * FROM usuarios WHERE usuario = ? OR correo = ?', 
-            [usuarioInput, usuarioInput]
-        );
-
-        if (usuarios.length === 0) {
-            return res.status(401).json({ 
+    jwt.verify(token, SECRET, (err, decoded) => {
+        if (err) {
+            return res.status(401).json({
                 status: "error",
-                mensaje: "Credenciales inválidas" 
+                mensaje: "Token inválido"
+            });
+        }
+        req.usuario = decoded;
+        next();
+    });
+}
+
+// ==================== VERIFICAR ADMIN ====================
+
+function verificarAdmin(req, res, next) {
+    if (req.usuario.rol !== "administrador") {
+        return res.status(403).json({
+            status: "error",
+            mensaje: "Acceso denegado"
+        });
+    }
+    next();
+}
+
+// ============================================================
+// ==================== MATERIALES ============================
+// ============================================================
+
+// ---------- REGISTRAR MATERIAL ----------
+
+app.post(
+    "/materiales",
+    verificarToken,
+    verificarAdmin,
+    upload.single("foto"),
+    (req, res) => {
+        const {
+            nombre,
+            cantidad,
+            estado,
+            categoria
+        } = req.body;
+
+        if (!nombre || !categoria) {
+            return res.status(400).json({
+                status: "error",
+                mensaje: "Nombre y categoría son obligatorios"
             });
         }
 
-        const user = usuarios[0];
+        const foto = req.file
+            ? req.file.path.replace(/\\/g, "/")
+            : null;
 
-        // Validar contraseña (por hash bcrypt o texto plano de respaldo)
-        let passValido = false;
-        const hash = user.password_hash || user.password;
-        
-        if (hash) {
-            passValido = await bcrypt.compare(claveInput, hash);
-        }
-        
-        if (!passValido && user.clave && user.clave === claveInput) {
-            passValido = true;
-        }
-
-        if (!passValido) {
-            return res.status(401).json({ 
-                status: "error",
-                mensaje: "Credenciales inválidas" 
-            });
-        }
-
-        // Generar Token
-        const token = jwt.sign(
-            { id: user.id, usuario: user.usuario, rol: user.rol },
-            JWT_SECRET,
-            { expiresIn: '8h' }
-        );
-
-        // Estructura exacta esperada por tu app Flutter:
-        return res.json({
-            status: "ok",
-            token: token,
-            rol: user.rol,
-            usuario: user.usuario,
-            mensaje: "Inicio de sesión exitoso"
-        });
-    } catch (error) {
-        console.error('Error en login:', error);
-        return res.status(500).json({ 
-            status: "error",
-            mensaje: "Error interno en el servidor" 
-        });
-    }
-});
-
-// ----------------------------------------------------
-// 7. RUTAS DE CATEGORÍAS
-// ----------------------------------------------------
-app.get('/api/categorias', verificarToken, async (req, res) => {
-    try {
-        const [categorias] = await pool.query('SELECT * FROM categorias ORDER BY nombre ASC');
-        res.json(categorias);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/categorias', verificarToken, async (req, res) => {
-    const { nombre, descripcion } = req.body;
-    try {
-        const [result] = await pool.query(
-            'INSERT INTO categorias (nombre, descripcion) VALUES (?, ?)',
-            [nombre, descripcion]
-        );
-        res.status(201).json({ id: result.insertId, nombre, descripcion });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ----------------------------------------------------
-// 8. RUTAS DE PRODUCTOS / INVENTARIO
-// ----------------------------------------------------
-
-// Listar productos (con soporte para búsqueda y paginación)
-app.get('/api/productos', verificarToken, async (req, res) => {
-    const { buscar, categoria_id } = req.query;
-    try {
-        let query = `
-            SELECT p.*, c.nombre AS categoria_nombre 
-            FROM productos p
-            LEFT JOIN categorias c ON p.categoria_id = c.id
-            WHERE 1=1
+        const sql = `
+            INSERT INTO materiales
+            (nombre, cantidad, estado, categoria, foto)
+            VALUES (?, ?, ?, ?, ?)
         `;
-        const params = [];
 
-        if (buscar) {
-            query += ' AND (p.nombre LIKE ? OR p.codigo_barras LIKE ?)';
-            params.push(`%${buscar}%`, `%${buscar}%`);
-        }
-        if (categoria_id) {
-            query += ' AND p.categoria_id = ?';
-            params.push(categoria_id);
-        }
+        conexion.query(
+            sql,
+            [
+                nombre,
+                cantidad || 1,
+                estado || "Bueno",
+                categoria,
+                foto
+            ],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
 
-        query += ' ORDER BY p.id DESC';
-        const [productos] = await pool.query(query, params);
-        res.json(productos);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+                generarQR(result.insertId, nombre);
 
-// Obtener un producto por ID
-app.get('/api/productos/:id', verificarToken, async (req, res) => {
-    try {
-        const [producto] = await pool.query(
-            `SELECT p.*, c.nombre AS categoria_nombre 
-             FROM productos p 
-             LEFT JOIN categorias c ON p.categoria_id = c.id 
-             WHERE p.id = ?`,
-            [req.params.id]
+                res.status(201).json({
+                    status: "ok",
+                    mensaje: "Material agregado correctamente",
+                    id: result.insertId
+                });
+            }
         );
-
-        if (producto.length === 0) {
-            return res.status(404).json({ mensaje: 'Producto no encontrado' });
-        }
-        res.json(producto[0]);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
-});
+);
 
-// Crear producto con código QR e imagen
-app.post('/api/productos', verificarToken, upload.single('imagen'), async (req, res) => {
-    const { nombre, descripcion, precio, stock, stock_minimo = 5, categoria_id, codigo_barras } = req.body;
-    const imagen_url = req.file ? `/uploads/${req.file.filename}` : null;
+// ---------- LISTAR MATERIALES ----------
 
-    try {
-        // Código único identificador
-        const codigo = codigo_barras || `PROD-${Date.now()}`;
-        const qrFilename = `${codigo}.png`;
-        const qrPath = path.join(qrDir, qrFilename);
+app.get(
+    "/materiales",
+    verificarToken,
+    (req, res) => {
+        const sql = `
+            SELECT
+                id,
+                nombre,
+                cantidad,
+                estado,
+                categoria,
+                foto
+            FROM materiales
+            ORDER BY id DESC
+        `;
 
-        // Generar código QR en disco
-        await QRCode.toFile(qrPath, JSON.stringify({ codigo, nombre, precio }));
-        const qr_url = `/qrs/${qrFilename}`;
-
-        const [result] = await pool.query(
-            `INSERT INTO productos 
-             (codigo_barras, nombre, descripcion, precio, stock, stock_minimo, categoria_id, imagen_url, qr_url) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [codigo, nombre, descripcion, precio, stock, stock_minimo, categoria_id, imagen_url, qr_url]
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result);
+            }
         );
+    }
+);
 
-        res.status(201).json({
-            mensaje: 'Producto creado exitosamente',
-            id: result.insertId,
-            codigo,
-            qr_url,
-            imagen_url
+// ---------- EDITAR MATERIAL ----------
+
+app.put(
+    "/materiales/:id",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const {
+            nombre,
+            categoria
+        } = req.body;
+
+        if (!nombre || !categoria) {
+            return res.status(400).json({
+                status: "error",
+                mensaje: "Nombre y categoría son obligatorios"
+            });
+        }
+
+        const sql = `
+            UPDATE materiales
+            SET nombre = ?,
+                categoria = ?
+            WHERE id = ?
+        `;
+
+        conexion.query(
+            sql,
+            [
+                nombre,
+                categoria,
+                req.params.id
+            ],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                if (result.affectedRows === 0) {
+                    return res.status(404).json({
+                        status: "error",
+                        mensaje: "Material no encontrado"
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Material actualizado correctamente"
+                });
+            }
+        );
+    }
+);
+
+// ---------- ELIMINAR MATERIAL ----------
+
+app.delete(
+    "/materiales/:id",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const sql = `
+            DELETE FROM materiales
+            WHERE id = ?
+        `;
+
+        conexion.query(
+            sql,
+            [req.params.id],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                if (result.affectedRows === 0) {
+                    return res.status(404).json({
+                        status: "error",
+                        mensaje: "Material no encontrado"
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Material eliminado correctamente"
+                });
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== LISTA DE MAESTROS =====================
+// ============================================================
+
+app.get(
+    "/usuarios/maestros",
+    verificarToken,
+    (req, res) => {
+        const sql = `
+            SELECT
+                id,
+                usuario,
+                rol
+            FROM usuarios
+            WHERE rol = 'maestro'
+        `;
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result);
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== REGISTRO SEGURO =======================
+// ============================================================
+
+app.post(
+    "/registro",
+    (req, res) => {
+        const {
+            usuario,
+            correo,
+            password,
+            rol
+        } = req.body;
+
+        if (!usuario || !correo || !password || !rol) {
+            return res.status(400).json({
+                status: "error",
+                mensaje: "Todos los campos son obligatorios"
+            });
+        }
+
+        const hashedPassword = bcrypt.hashSync(password, 8);
+
+        const sql = `
+            INSERT INTO usuarios
+            (usuario, correo, password_hash, rol)
+            VALUES (?, ?, ?, ?)
+        `;
+
+        conexion.query(
+            sql,
+            [
+                usuario,
+                correo,
+                hashedPassword,
+                rol
+            ],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Usuario registrado"
+                });
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== LOGIN ================================
+// ============================================================
+
+const handleLogin = (req, res) => {
+    const usuario = req.body.usuario || req.body.email;
+    const clave = req.body.clave || req.body.password;
+
+    const sql = `
+        SELECT *
+        FROM usuarios
+        WHERE usuario = ?
+    `;
+
+    conexion.query(
+        sql,
+        [usuario],
+        (err, result) => {
+            if (err) {
+                return res.status(500).json({
+                    status: "error",
+                    mensaje: err
+                });
+            }
+
+            if (result.length === 0) {
+                return res.json({
+                    status: "error",
+                    mensaje: "Usuario no encontrado"
+                });
+            }
+
+            const usuarioDB = result[0];
+
+            if (usuarioDB.password_hash) {
+                const passwordValido = bcrypt.compareSync(
+                    clave,
+                    usuarioDB.password_hash
+                );
+
+                if (!passwordValido) {
+                    return res.json({
+                        status: "error",
+                        mensaje: "Contraseña incorrecta"
+                    });
+                }
+            } else {
+                if (usuarioDB.clave !== clave) {
+                    return res.json({
+                        status: "error",
+                        mensaje: "Contraseña incorrecta"
+                    });
+                }
+
+                const hashedPassword = bcrypt.hashSync(clave, 8);
+                const sqlActualizar = `
+                    UPDATE usuarios
+                    SET password_hash = ?
+                    WHERE id = ?
+                `;
+
+                conexion.query(
+                    sqlActualizar,
+                    [hashedPassword, usuarioDB.id],
+                    error => {
+                        if (error) {
+                            console.log("Error al generar hash:", error);
+                        }
+                    }
+                );
+            }
+
+            const token = jwt.sign(
+                {
+                    id: usuarioDB.id,
+                    rol: usuarioDB.rol
+                },
+                SECRET,
+                {
+                    expiresIn: "8h"
+                }
+            );
+
+            res.json({
+                status: "ok",
+                token: token,
+                rol: usuarioDB.rol,
+                usuario: usuarioDB.usuario
+            });
+        }
+    );
+};
+
+// Responde a ambas rutas para que no falle jamás
+app.post("/login", handleLogin);
+app.post("/api/auth/login", handleLogin);
+
+// ============================================================
+// ==================== PRUEBA ADMIN ==========================
+// ============================================================
+
+app.get(
+    "/admin/reportes",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        res.json({
+            status: "ok",
+            mensaje: "Bienvenido administrador"
         });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
-});
+);
 
-// Actualizar producto
-app.put('/api/productos/:id', verificarToken, upload.single('imagen'), async (req, res) => {
-    const { id } = req.params;
-    const { nombre, descripcion, precio, stock, stock_minimo, categoria_id } = req.body;
+// ============================================================
+// ==================== PRÉSTAMOS =============================
+// ============================================================
 
-    try {
-        let query = `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, stock = ?, stock_minimo = ?, categoria_id = ?`;
-        const params = [nombre, descripcion, precio, stock, stock_minimo, categoria_id];
+app.post(
+    "/prestamos",
+    (req, res) => {
+        const {
+            material_id,
+            fecha_prestamo,
+            maestro
+        } = req.body;
 
-        if (req.file) {
-            query += `, imagen_url = ?`;
-            params.push(`/uploads/${req.file.filename}`);
-        }
+        const sqlPermiso = `
+            SELECT *
+            FROM permisos
+            WHERE maestro = ?
+            AND material_id = ?
+            AND puede_prestar = TRUE
+        `;
 
-        query += ` WHERE id = ?`;
-        params.push(id);
+        conexion.query(
+            sqlPermiso,
+            [
+                maestro,
+                material_id
+            ],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
 
-        const [result] = await pool.query(query, params);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ mensaje: 'Producto no encontrado' });
-        }
+                if (result.length === 0) {
+                    return res.json({
+                        status: "fail",
+                        mensaje: "No tienes permiso para prestar este material"
+                    });
+                }
 
-        res.json({ mensaje: 'Producto actualizado con éxito' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+                const sql = `
+                    INSERT INTO prestamos
+                    (material_id, fecha_prestamo, maestro)
+                    VALUES (?, ?, ?)
+                `;
 
-// Eliminar producto
-app.delete('/api/productos/:id', verificarToken, async (req, res) => {
-    try {
-        const [result] = await pool.query('DELETE FROM productos WHERE id = ?', [req.params.id]);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ mensaje: 'Producto no encontrado' });
-        }
-        res.json({ mensaje: 'Producto eliminado del inventario' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+                conexion.query(
+                    sql,
+                    [
+                        material_id,
+                        fecha_prestamo,
+                        maestro
+                    ],
+                    (err2, result2) => {
+                        if (err2) {
+                            return res.status(500).json({
+                                status: "error",
+                                mensaje: err2
+                            });
+                        }
 
-// ----------------------------------------------------
-// 9. MOVIMIENTOS DE ENTRADA Y SALIDA (KARDEX / STOCK)
-// ----------------------------------------------------
-app.post('/api/movimientos', verificarToken, async (req, res) => {
-    const { producto_id, tipo, cantidad, motivo } = req.body; // tipo: 'ENTRADA' o 'SALIDA'
-    const usuario_id = req.usuario.id;
-
-    if (!['ENTRADA', 'SALIDA'].includes(tipo) || cantidad <= 0) {
-        return res.status(400).json({ mensaje: 'Datos de movimiento inválidos' });
-    }
-
-    const conn = await pool.getConnection();
-    try {
-        await conn.beginTransaction();
-
-        const [prod] = await conn.query('SELECT stock FROM productos WHERE id = ? FOR UPDATE', [producto_id]);
-        if (prod.length === 0) {
-            await conn.rollback();
-            return res.status(404).json({ mensaje: 'Producto no encontrado' });
-        }
-
-        const stockActual = prod[0].stock;
-        if (tipo === 'SALIDA' && stockActual < cantidad) {
-            await conn.rollback();
-            return res.status(400).json({ mensaje: 'Stock insuficiente para esta salida' });
-        }
-
-        const nuevoStock = tipo === 'ENTRADA' ? stockActual + Number(cantidad) : stockActual - Number(cantidad);
-
-        await conn.query('UPDATE productos SET stock = ? WHERE id = ?', [nuevoStock, producto_id]);
-        await conn.query(
-            'INSERT INTO movimientos (producto_id, usuario_id, tipo, cantidad, motivo) VALUES (?, ?, ?, ?, ?)',
-            [producto_id, usuario_id, tipo, cantidad, motivo]
+                        res.json({
+                            status: "ok",
+                            mensaje: "Préstamo registrado"
+                        });
+                    }
+                );
+            }
         );
-
-        await conn.commit();
-        res.json({ mensaje: 'Movimiento registrado', nuevoStock });
-    } catch (error) {
-        await conn.rollback();
-        res.status(500).json({ error: error.message });
-    } finally {
-        conn.release();
     }
+);
+
+// ---------- LISTA DE PRÉSTAMOS ----------
+
+app.get(
+    "/prestamos",
+    (req, res) => {
+        const sql = `
+            SELECT
+                prestamos.id,
+                prestamos.material_id,
+                materiales.nombre AS material,
+                prestamos.fecha_prestamo,
+                prestamos.fecha_devolucion,
+                prestamos.maestro
+            FROM prestamos
+            INNER JOIN materiales
+                ON prestamos.material_id = materiales.id
+            ORDER BY prestamos.fecha_prestamo DESC
+        `;
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result);
+            }
+        );
+    }
+);
+
+// ---------- ACTUALIZAR PRÉSTAMO ----------
+
+app.put(
+    "/prestamos/:id",
+    (req, res) => {
+        const { fecha_devolucion } = req.body;
+
+        const sql = `
+            UPDATE prestamos
+            SET fecha_devolucion = ?
+            WHERE id = ?
+        `;
+
+        conexion.query(
+            sql,
+            [fecha_devolucion, req.params.id],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Préstamo actualizado"
+                });
+            }
+        );
+    }
+);
+
+// ---------- DEVOLVER POR MATERIAL ----------
+
+app.put(
+    "/prestamos/devolver/:material_id",
+    (req, res) => {
+        const sql = `
+            UPDATE prestamos
+            SET fecha_devolucion = NOW()
+            WHERE material_id = ?
+            AND fecha_devolucion IS NULL
+        `;
+
+        conexion.query(
+            sql,
+            [req.params.material_id],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                if (result.affectedRows === 0) {
+                    return res.json({
+                        status: "fail",
+                        mensaje: "No hay un préstamo pendiente para este material"
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Entrega registrada"
+                });
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== REPORTES ==============================
+// ============================================================
+
+// ---------- TOTAL ----------
+
+app.get(
+    "/reportes/total",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const sql = "SELECT COUNT(*) AS total FROM prestamos";
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result[0]);
+            }
+        );
+    }
+);
+
+// ---------- PENDIENTES ----------
+
+app.get(
+    "/reportes/pendientes",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const sql = `
+            SELECT COUNT(*) AS pendientes
+            FROM prestamos
+            WHERE fecha_devolucion IS NULL
+        `;
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result[0]);
+            }
+        );
+    }
+);
+
+// ---------- DEVUELTOS ----------
+
+app.get(
+    "/reportes/devueltos",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const sql = `
+            SELECT COUNT(*) AS devueltos
+            FROM prestamos
+            WHERE fecha_devolucion IS NOT NULL
+        `;
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result[0]);
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== NOTIFICACIONES ========================
+// ============================================================
+
+app.get(
+    "/notificaciones/:maestro",
+    (req, res) => {
+        const sql = `
+            SELECT *
+            FROM prestamos
+            WHERE maestro = ?
+            AND fecha_devolucion IS NULL
+        `;
+
+        conexion.query(
+            sql,
+            [req.params.maestro],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result);
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== PERMISOS ==============================
+// ============================================================
+
+app.post(
+    "/permisos",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const {
+            maestro,
+            material_id,
+            puede_ver,
+            puede_prestar,
+            puede_devolver
+        } = req.body;
+
+        const sql = `
+            INSERT INTO permisos
+            (maestro, material_id, puede_ver, puede_prestar, puede_devolver)
+            VALUES (?, ?, ?, ?, ?)
+        `;
+
+        conexion.query(
+            sql,
+            [
+                maestro,
+                material_id,
+                puede_ver,
+                puede_prestar,
+                puede_devolver
+            ],
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                res.json({
+                    status: "ok",
+                    mensaje: "Permiso asignado"
+                });
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== QR ====================================
+// ============================================================
+
+function generarQR(materialId, nombre) {
+    const ruta = `./qrs/${materialId}.png`;
+
+    QRCode.toFile(
+        ruta,
+        materialId.toString(),
+        {
+            color: {
+                dark: "#000000",
+                light: "#FFFFFF"
+            },
+            margin: 2,
+            width: 300
+        },
+        function (err) {
+            if (err) {
+                console.error("Error generando QR:", err);
+                return;
+            }
+            console.log(`QR generado en: ${ruta}`);
+        }
+    );
+}
+
+// ============================================================
+// ==================== REPORTE PDF ============================
+// ============================================================
+
+app.get(
+    "/reportes/pdf",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const {
+            maestro,
+            fecha_inicio,
+            fecha_fin
+        } = req.query;
+
+        let sql = `
+            SELECT
+                prestamos.id,
+                prestamos.material_id,
+                materiales.nombre AS material,
+                prestamos.fecha_prestamo,
+                prestamos.fecha_devolucion,
+                prestamos.maestro
+            FROM prestamos
+            INNER JOIN materiales
+                ON prestamos.material_id = materiales.id
+            WHERE 1 = 1
+        `;
+
+        const valores = [];
+
+        if (maestro && maestro.trim() !== "") {
+            sql += " AND prestamos.maestro = ?";
+            valores.push(maestro);
+        }
+
+        if (fecha_inicio) {
+            sql += " AND DATE(prestamos.fecha_prestamo) >= ?";
+            valores.push(fecha_inicio);
+        }
+
+        if (fecha_fin) {
+            sql += " AND DATE(prestamos.fecha_prestamo) <= ?";
+            valores.push(fecha_fin);
+        }
+
+        sql += " ORDER BY prestamos.fecha_prestamo DESC";
+
+        conexion.query(
+            sql,
+            valores,
+            (err, resultados) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                const doc = new PDFDocument({ margin: 40 });
+
+                res.setHeader("Content-Type", "application/pdf");
+                res.setHeader(
+                    "Content-Disposition",
+                    "attachment; filename=reporte_prestamos.pdf"
+                );
+
+                doc.pipe(res);
+
+                doc.fontSize(18).text("Reporte de Préstamos", { align: "center" });
+                doc.moveDown();
+                doc.fontSize(10).text(`Maestro: ${maestro || "Todos"}`);
+                doc.text(`Fecha inicio: ${fecha_inicio || "Todas"}`);
+                doc.text(`Fecha fin: ${fecha_fin || "Todas"}`);
+                doc.moveDown();
+
+                resultados.forEach((p, index) => {
+                    doc.fontSize(11).text(`${index + 1}. Material: ${p.material}`);
+                    doc.fontSize(9).text(`ID: ${p.material_id} | Maestro: ${p.maestro}`);
+                    doc.text(`Préstamo: ${p.fecha_prestamo}`);
+                    doc.text(`Devolución: ${p.fecha_devolucion || "Pendiente"}`);
+                    doc.moveDown();
+                });
+
+                if (resultados.length === 0) {
+                    doc.fontSize(12).text(
+                        "No se encontraron préstamos con los filtros seleccionados."
+                    );
+                }
+
+                doc.end();
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== REPORTE EXCEL =========================
+// ============================================================
+
+app.get(
+    "/reportes/excel",
+    verificarToken,
+    verificarAdmin,
+    async (req, res) => {
+        const {
+            maestro,
+            fecha_inicio,
+            fecha_fin
+        } = req.query;
+
+        let sql = `
+            SELECT
+                prestamos.id,
+                prestamos.material_id,
+                materiales.nombre AS material,
+                prestamos.fecha_prestamo,
+                prestamos.fecha_devolucion,
+                prestamos.maestro
+            FROM prestamos
+            INNER JOIN materiales
+                ON prestamos.material_id = materiales.id
+            WHERE 1 = 1
+        `;
+
+        const valores = [];
+
+        if (maestro && maestro.trim() !== "") {
+            sql += " AND prestamos.maestro = ?";
+            valores.push(maestro);
+        }
+
+        if (fecha_inicio) {
+            sql += " AND DATE(prestamos.fecha_prestamo) >= ?";
+            valores.push(fecha_inicio);
+        }
+
+        if (fecha_fin) {
+            sql += " AND DATE(prestamos.fecha_prestamo) <= ?";
+            valores.push(fecha_fin);
+        }
+
+        sql += " ORDER BY prestamos.fecha_prestamo DESC";
+
+        conexion.query(
+            sql,
+            valores,
+            async (err, resultados) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+
+                const workbook = new ExcelJS.Workbook();
+                const worksheet = workbook.addWorksheet("Préstamos");
+
+                worksheet.columns = [
+                    { header: "ID", key: "id", width: 10 },
+                    { header: "Material ID", key: "material_id", width: 15 },
+                    { header: "Material", key: "material", width: 25 },
+                    { header: "Maestro", key: "maestro", width: 25 },
+                    { header: "Fecha préstamo", key: "fecha_prestamo", width: 25 },
+                    { header: "Fecha devolución", key: "fecha_devolucion", width: 25 }
+                ];
+
+                resultados.forEach(p => {
+                    worksheet.addRow({
+                        id: p.id,
+                        material_id: p.material_id,
+                        material: p.material,
+                        maestro: p.maestro,
+                        fecha_prestamo: p.fecha_prestamo,
+                        fecha_devolucion: p.fecha_devolucion || "Pendiente"
+                    });
+                });
+
+                worksheet.getRow(1).font = { bold: true };
+
+                res.setHeader(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                );
+                res.setHeader(
+                    "Content-Disposition",
+                    "attachment; filename=reporte_prestamos.xlsx"
+                );
+
+                await workbook.xlsx.write(res);
+                res.end();
+            }
+        );
+    }
+);
+
+// ============================================================
+// ==================== DASHBOARD =============================
+// ============================================================
+
+app.get(
+    "/dashboard",
+    verificarToken,
+    verificarAdmin,
+    (req, res) => {
+        const sql = `
+            SELECT
+                (SELECT COUNT(*) FROM materiales) AS total_materiales,
+                (SELECT COUNT(*) FROM prestamos WHERE fecha_devolucion IS NULL) AS prestados,
+                (SELECT COUNT(*) FROM prestamos WHERE fecha_devolucion IS NOT NULL) AS devueltos,
+                (SELECT COUNT(*) FROM materiales WHERE estado = 'Malo') AS danados
+        `;
+
+        conexion.query(
+            sql,
+            (err, result) => {
+                if (err) {
+                    return res.status(500).json({
+                        status: "error",
+                        mensaje: err
+                    });
+                }
+                res.json(result[0]);
+            }
+        );
+    }
+);
+
+app.get("/historial", (req, res) => {
+    const { maestro, material, fecha_inicio, fecha_fin } = req.query;
+
+    let sql = `
+        SELECT 
+            p.id,
+            m.nombre AS material,
+            p.maestro AS docente,
+            p.fecha_prestamo,
+            p.fecha_devolucion
+        FROM prestamos p
+        JOIN materiales m ON p.material_id = m.id
+        WHERE 1=1
+    `;
+
+    const params = [];
+
+    if (maestro) {
+        sql += " AND p.maestro = ?";
+        params.push(maestro);
+    }
+
+    if (material) {
+        sql += " AND LOWER(TRIM(m.nombre)) = LOWER(TRIM(?))";
+        params.push(material);
+    }
+
+    if (fecha_inicio && fecha_fin) {
+        sql += " AND DATE(p.fecha_prestamo) BETWEEN ? AND ?";
+        params.push(fecha_inicio, fecha_fin);
+    }
+
+    sql += " ORDER BY p.fecha_prestamo DESC";
+
+    conexion.query(sql, params, (err, result) => {
+        if (err) {
+            return res.status(500).json({
+                status: "error",
+                mensaje: err.message
+            });
+        }
+        res.json(result);
+    });
 });
 
-// ----------------------------------------------------
-// 10. GENERACIÓN DE REPORTES (EXCEL Y PDF)
-// ----------------------------------------------------
+// ============================================================
+// ==================== SERVIDOR ==============================
+// ============================================================
 
-// Reporte en Excel
-app.get('/api/reportes/excel', verificarToken, async (req, res) => {
-    try {
-        const [productos] = await pool.query(`
-            SELECT p.id, p.codigo_barras, p.nombre, c.nombre AS categoria, p.precio, p.stock, p.stock_minimo
-            FROM productos p
-            LEFT JOIN categorias c ON p.categoria_id = c.id
-        `);
+const PORT = process.env.PORT || 3000;
 
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Inventario');
-
-        worksheet.columns = [
-            { header: 'ID', key: 'id', width: 8 },
-            { header: 'Código', key: 'codigo_barras', width: 20 },
-            { header: 'Nombre', key: 'nombre', width: 30 },
-            { header: 'Categoría', key: 'categoria', width: 20 },
-            { header: 'Precio ($)', key: 'precio', width: 12 },
-            { header: 'Stock Actual', key: 'stock', width: 14 },
-            { header: 'Stock Mínimo', key: 'stock_minimo', width: 14 }
-        ];
-
-        // Estilos para la cabecera
-        worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-        worksheet.getRow(1).fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FF1F4E78' }
-        };
-
-        productos.forEach(p => worksheet.addRow(p));
-
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', 'attachment; filename=reporte_inventario.xlsx');
-
-        await workbook.xlsx.write(res);
-        res.end();
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Reporte en PDF
-app.get('/api/reportes/pdf', verificarToken, async (req, res) => {
-    try {
-        const [productos] = await pool.query('SELECT nombre, precio, stock FROM productos ORDER BY nombre ASC');
-
-        const doc = new PDFDocument({ margin: 40 });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', 'inline; filename=inventario.pdf');
-
-        doc.pipe(res);
-
-        // Encabezado
-        doc.fontSize(20).text('Reporte de Inventario', { align: 'center' });
-        doc.moveDown();
-        doc.fontSize(10).text(`Fecha de emisión: ${new Date().toLocaleString()}`, { align: 'right' });
-        doc.moveDown();
-
-        // Tabla simple
-        doc.fontSize(12).text('Producto', 50, doc.y, { continued: true, width: 250 });
-        doc.text('Precio', 320, doc.y, { continued: true, width: 100 });
-        doc.text('Stock', 440, doc.y);
-        doc.moveTo(40, doc.y + 5).lineTo(550, doc.y + 5).stroke();
-        doc.moveDown(0.5);
-
-        productos.forEach(p => {
-            const y = doc.y;
-            doc.fontSize(10).text(p.nombre, 50, y, { width: 250 });
-            doc.text(`$${Number(p.precio).toFixed(2)}`, 320, y, { width: 100 });
-            doc.text(`${p.stock}`, 440, y);
-            doc.moveDown(0.5);
-        });
-
-        doc.end();
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ----------------------------------------------------
-// 11. INICIO DEL SERVIDOR
-// ----------------------------------------------------
-app.listen(PORT, () => {
-    console.log(`🚀 Servidor ejecutándose en http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 Servidor ejecutándose en el puerto ${PORT}`);
 });
