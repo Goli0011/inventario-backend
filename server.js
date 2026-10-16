@@ -36,10 +36,11 @@ app.use('/qrs', express.static(qrDir));
 // 3. CONEXIÓN A BASE DE DATOS (MYSQL POOL)
 // ----------------------------------------------------
 const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'cafemusunxd23',
-    database: process.env.DB_NAME || 'inventario_db',
+    host: process.env.MYSQLHOST || process.env.DB_HOST || 'localhost',
+    user: process.env.MYSQLUSER || process.env.DB_USER || 'root',
+    password: process.env.MYSQLPASSWORD || process.env.DB_PASSWORD || 'cafemusunxd23',
+    database: process.env.MYSQL_DATABASE || process.env.MYSQLDATABASE || process.env.DB_NAME || 'railway',
+    port: Number(process.env.MYSQLPORT) || 3306,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
