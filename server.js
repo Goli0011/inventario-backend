@@ -63,8 +63,9 @@ app.get("/", (req, res) => {
 
 // ==================== MIDDLEWARE JWT ====================
 
+// ==================== MIDDLEWARE JWT ADAPTADO ====================
 function verificarToken(req, res, next) {
-    const token = req.headers["authorization"];
+    let token = req.headers["authorization"] || req.headers["x-access-token"];
 
     if (!token) {
         return res.status(401).json({
@@ -73,17 +74,52 @@ function verificarToken(req, res, next) {
         });
     }
 
+    // Si viene como "Bearer <token>", extrae solo la clave
+    if (token.startsWith("Bearer ")) {
+        token = token.slice(7, token.length).trim();
+    }
+
     jwt.verify(token, SECRET, (err, decoded) => {
         if (err) {
             return res.status(401).json({
                 status: "error",
-                mensaje: "Token inválido"
+                mensaje: "Token inválido o expirado"
             });
         }
         req.usuario = decoded;
         next();
     });
 }
+
+// ==================== LISTAR MATERIALES (AMBAS RUTAS) ====================
+const listarMaterialesHandler = (req, res) => {
+    const sql = `
+        SELECT
+            id,
+            nombre,
+            cantidad,
+            estado,
+            categoria,
+            foto
+        FROM materiales
+        ORDER BY id DESC
+    `;
+
+    conexion.query(sql, (err, result) => {
+        if (err) {
+            return res.status(500).json({
+                status: "error",
+                mensaje: err.message || err
+            });
+        }
+        // Devuelve el array de materiales directamente
+        res.json(result);
+    });
+};
+
+// Responde tanto con /materiales como con /api/materiales
+app.get("/materiales", verificarToken, listarMaterialesHandler);
+app.get("/api/materiales", verificarToken, listarMaterialesHandler);
 
 // ==================== VERIFICAR ADMIN ====================
 
