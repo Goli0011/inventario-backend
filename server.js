@@ -132,74 +132,70 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-    // Acepta si Flutter manda "usuario", "email" o "nombre"
-    const identificador = req.body.usuario || req.body.email || req.body.nombre;
-    const password = req.body.password || req.body.clave;
+    const usuarioInput = req.body.usuario || req.body.email;
+    const claveInput = req.body.clave || req.body.password;
 
-    if (!identificador || !password) {
+    if (!usuarioInput || !claveInput) {
         return res.status(400).json({ 
-            error: 'Faltan credenciales',
-            mensaje: 'Debes ingresar usuario y contraseña' 
+            status: "error",
+            mensaje: "Debes ingresar usuario y contraseña" 
         });
     }
 
     try {
-        // Busca coincidencia en columna 'usuario' o 'correo'/'email'
         const [usuarios] = await pool.query(
             'SELECT * FROM usuarios WHERE usuario = ? OR correo = ?', 
-            [identificador, identificador]
+            [usuarioInput, usuarioInput]
         );
 
         if (usuarios.length === 0) {
             return res.status(401).json({ 
-                error: 'Usuario no encontrado',
-                mensaje: 'Credenciales inválidas' 
+                status: "error",
+                mensaje: "Credenciales inválidas" 
             });
         }
 
         const user = usuarios[0];
 
-        // Comprueba si coincide con el hash o con texto plano directo
+        // Validar contraseña (por hash bcrypt o texto plano de respaldo)
         let passValido = false;
         const hash = user.password_hash || user.password;
         
         if (hash) {
-            passValido = await bcrypt.compare(password, hash);
+            passValido = await bcrypt.compare(claveInput, hash);
         }
         
-        // Respaldo por si en la base de datos la clave está en texto plano en la columna 'clave'
-        if (!passValido && user.clave && user.clave === password) {
+        if (!passValido && user.clave && user.clave === claveInput) {
             passValido = true;
         }
 
         if (!passValido) {
             return res.status(401).json({ 
-                error: 'Contraseña incorrecta',
-                mensaje: 'Credenciales inválidas' 
+                status: "error",
+                mensaje: "Credenciales inválidas" 
             });
         }
 
+        // Generar Token
         const token = jwt.sign(
             { id: user.id, usuario: user.usuario, rol: user.rol },
             JWT_SECRET,
             { expiresIn: '8h' }
         );
 
+        // Estructura exacta esperada por tu app Flutter:
         return res.json({
-            exito: true,
-            mensaje: 'Inicio de sesión exitoso',
-            token,
-            usuario: {
-                id: user.id,
-                usuario: user.usuario,
-                rol: user.rol
-            }
+            status: "ok",
+            token: token,
+            rol: user.rol,
+            usuario: user.usuario,
+            mensaje: "Inicio de sesión exitoso"
         });
     } catch (error) {
         console.error('Error en login:', error);
         return res.status(500).json({ 
-            error: error.message,
-            mensaje: 'Error interno en el servidor' 
+            status: "error",
+            mensaje: "Error interno en el servidor" 
         });
     }
 });
