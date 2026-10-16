@@ -200,9 +200,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// ----------------------------------------------------
-// 7. RUTAS DE CATEGORÍAS
-// ----------------------------------------------------
+
 app.get('/api/categorias', verificarToken, async (req, res) => {
     try {
         const [categorias] = await pool.query('SELECT * FROM categorias ORDER BY nombre ASC');
@@ -481,7 +479,6 @@ app.get('/api/reportes/pdf', verificarToken, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 // ----------------------------------------------------
 // 11. INICIO DEL SERVIDOR
 // ----------------------------------------------------
