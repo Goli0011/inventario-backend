@@ -131,35 +131,76 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// Inicio de sesión
 app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body;
+    // Acepta si Flutter manda "usuario", "email" o "nombre"
+    const identificador = req.body.usuario || req.body.email || req.body.nombre;
+    const password = req.body.password || req.body.clave;
+
+    if (!identificador || !password) {
+        return res.status(400).json({ 
+            error: 'Faltan credenciales',
+            mensaje: 'Debes ingresar usuario y contraseña' 
+        });
+    }
 
     try {
-        const [usuarios] = await pool.query('SELECT * FROM usuarios WHERE email = ?', [email]);
+        // Busca coincidencia en columna 'usuario' o 'correo'/'email'
+        const [usuarios] = await pool.query(
+            'SELECT * FROM usuarios WHERE usuario = ? OR correo = ?', 
+            [identificador, identificador]
+        );
+
         if (usuarios.length === 0) {
-            return res.status(401).json({ mensaje: 'Credenciales inválidas' });
+            return res.status(401).json({ 
+                error: 'Usuario no encontrado',
+                mensaje: 'Credenciales inválidas' 
+            });
         }
 
-        const usuario = usuarios[0];
-        const passValido = await bcrypt.compare(password, usuario.password);
+        const user = usuarios[0];
+
+        // Comprueba si coincide con el hash o con texto plano directo
+        let passValido = false;
+        const hash = user.password_hash || user.password;
+        
+        if (hash) {
+            passValido = await bcrypt.compare(password, hash);
+        }
+        
+        // Respaldo por si en la base de datos la clave está en texto plano en la columna 'clave'
+        if (!passValido && user.clave && user.clave === password) {
+            passValido = true;
+        }
+
         if (!passValido) {
-            return res.status(401).json({ mensaje: 'Credenciales inválidas' });
+            return res.status(401).json({ 
+                error: 'Contraseña incorrecta',
+                mensaje: 'Credenciales inválidas' 
+            });
         }
 
         const token = jwt.sign(
-            { id: usuario.id, nombre: usuario.nombre, email: usuario.email, rol: usuario.rol },
+            { id: user.id, usuario: user.usuario, rol: user.rol },
             JWT_SECRET,
             { expiresIn: '8h' }
         );
 
-        res.json({
+        return res.json({
+            exito: true,
             mensaje: 'Inicio de sesión exitoso',
             token,
-            usuario: { id: usuario.id, nombre: usuario.nombre, rol: usuario.rol }
+            usuario: {
+                id: user.id,
+                usuario: user.usuario,
+                rol: user.rol
+            }
         });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error en login:', error);
+        return res.status(500).json({ 
+            error: error.message,
+            mensaje: 'Error interno en el servidor' 
+        });
     }
 });
 
